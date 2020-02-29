@@ -288,11 +288,10 @@ public class BootstrapTools {
 	public static void writeConfiguration(Configuration cfg, File file) throws IOException {
 		try (FileWriter fwrt = new FileWriter(file);
 			PrintWriter out = new PrintWriter(fwrt)) {
-			for (String key : cfg.keySet()) {
-				String value = cfg.getString(key, null);
-				out.print(key);
+			for (Map.Entry<String, String> entry : cfg.toMap().entrySet()) {
+				out.print(entry.getKey());
 				out.print(": ");
-				out.println(value);
+				out.println(entry.getValue());
 			}
 		}
 	}
@@ -348,7 +347,7 @@ public class BootstrapTools {
 	 * Get an instance of the dynamic properties option.
 	 *
 	 * <p>Dynamic properties allow the user to specify additional configuration values with -D, such as
-	 * <tt> -Dfs.overwrite-files=true  -Dtaskmanager.memory.shuffle.min=536346624</tt>
+	 * <tt> -Dfs.overwrite-files=true  -Dtaskmanager.memory.network.min=536346624</tt>
      */
 	public static Option newDynamicPropertiesOption() {
 		return new Option(DYNAMIC_PROPERTIES_OPT, true, "Dynamic properties");
@@ -401,8 +400,8 @@ public class BootstrapTools {
 		final Map<String, String> startCommandValues = new HashMap<>();
 		startCommandValues.put("java", "$JAVA_HOME/bin/java");
 
-		final TaskExecutorResourceSpec taskExecutorResourceSpec = tmParams.getTaskExecutorResourceSpec();
-		startCommandValues.put("jvmmem", TaskExecutorResourceUtils.generateJvmParametersStr(taskExecutorResourceSpec));
+		final TaskExecutorProcessSpec taskExecutorProcessSpec = tmParams.getTaskExecutorProcessSpec();
+		startCommandValues.put("jvmmem", TaskExecutorProcessUtils.generateJvmParametersStr(taskExecutorProcessSpec));
 
 		String javaOpts = flinkConfig.getString(CoreOptions.FLINK_JVM_OPTIONS);
 		if (flinkConfig.getString(CoreOptions.FLINK_TM_JVM_OPTIONS).length() > 0) {
@@ -426,6 +425,8 @@ public class BootstrapTools {
 			if (hasLog4j) {
 				logging += " -Dlog4j.configuration=file:" + configDirectory +
 					"/log4j.properties";
+				logging += " -Dlog4j.configurationFile=file:" + configDirectory +
+					"/log4j.properties";
 			}
 		}
 
@@ -435,7 +436,7 @@ public class BootstrapTools {
 			"1> " + logDirectory + "/taskmanager.out " +
 			"2> " + logDirectory + "/taskmanager.err");
 
-		String argsStr = TaskExecutorResourceUtils.generateDynamicConfigsStr(taskExecutorResourceSpec) + " --configDir " + configDirectory;
+		String argsStr = TaskExecutorProcessUtils.generateDynamicConfigsStr(taskExecutorProcessSpec) + " --configDir " + configDirectory;
 		if (!mainArgs.isEmpty()) {
 			argsStr += " " + mainArgs;
 		}
