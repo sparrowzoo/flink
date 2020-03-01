@@ -144,7 +144,7 @@ The Apache Flink project originated from the [Stratosphere](http://stratosphere.
 
 ## marge from origin apache
 ```
-git remote add apache https://github.com/apache/flink.git
+git remote add apache git@github.com:apache/flink.git
 git remote update apache
 git pull apache master
 git rebase apache/master
