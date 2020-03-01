@@ -76,6 +76,11 @@ Prerequisites for building Flink:
 git clone https://github.com/apache/flink.git
 cd flink
 mvn clean package -DskipTests # this will take up to 10 minutes
+This instructs Maven (mvn) to first remove all existing builds (clean) and then create a new Flink binary (install).
+
+To speed up the build you can skip tests, QA plugins, and JavaDocs:
+
+mvn clean install -DskipTests -Dfast
 ```
 
 Flink is now installed in `build-target`.
