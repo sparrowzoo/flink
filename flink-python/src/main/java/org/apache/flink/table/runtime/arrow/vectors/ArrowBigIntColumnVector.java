@@ -19,7 +19,7 @@
 package org.apache.flink.table.runtime.arrow.vectors;
 
 import org.apache.flink.annotation.Internal;
-import org.apache.flink.table.dataformat.vector.LongColumnVector;
+import org.apache.flink.table.data.vector.LongColumnVector;
 import org.apache.flink.util.Preconditions;
 
 import org.apache.arrow.vector.BigIntVector;
@@ -47,10 +47,5 @@ public final class ArrowBigIntColumnVector implements LongColumnVector {
 	@Override
 	public boolean isNullAt(int i) {
 		return bigIntVector.isNull(i);
-	}
-
-	@Override
-	public void reset() {
-		bigIntVector.reset();
 	}
 }

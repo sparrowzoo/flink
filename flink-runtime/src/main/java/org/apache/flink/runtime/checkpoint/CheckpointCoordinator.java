@@ -55,6 +55,8 @@ import javax.annotation.Nullable;
 
 import java.io.IOException;
 import java.util.ArrayDeque;
+import java.util.Collection;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.LinkedHashMap;
@@ -109,6 +111,9 @@ public class CheckpointCoordinator {
 
 	/** Tasks who need to be sent a message when a checkpoint is confirmed. */
 	private final ExecutionVertex[] tasksToCommitTo;
+
+	/** The operator coordinators that need to be checkpointed. */
+	private final Collection<OperatorCoordinatorCheckpointContext> coordinatorsToCheckpoint;
 
 	/** Map from checkpoint ID to the pending checkpoint. */
 	private final Map<Long, PendingCheckpoint> pendingCheckpoints;
@@ -189,6 +194,10 @@ public class CheckpointCoordinator {
 
 	private final Clock clock;
 
+	private final boolean isExactlyOnceMode;
+
+	private final boolean isUnalignedCheckpoint;
+
 	/** Flag represents there is an in-flight trigger request. */
 	private boolean isTriggering = false;
 
@@ -203,6 +212,7 @@ public class CheckpointCoordinator {
 		ExecutionVertex[] tasksToTrigger,
 		ExecutionVertex[] tasksToWaitFor,
 		ExecutionVertex[] tasksToCommitTo,
+		Collection<OperatorCoordinatorCheckpointContext> coordinatorsToCheckpoint,
 		CheckpointIDCounter checkpointIDCounter,
 		CompletedCheckpointStore completedCheckpointStore,
 		StateBackend checkpointStateBackend,
@@ -217,6 +227,7 @@ public class CheckpointCoordinator {
 			tasksToTrigger,
 			tasksToWaitFor,
 			tasksToCommitTo,
+			coordinatorsToCheckpoint,
 			checkpointIDCounter,
 			completedCheckpointStore,
 			checkpointStateBackend,
@@ -234,6 +245,7 @@ public class CheckpointCoordinator {
 			ExecutionVertex[] tasksToTrigger,
 			ExecutionVertex[] tasksToWaitFor,
 			ExecutionVertex[] tasksToCommitTo,
+			Collection<OperatorCoordinatorCheckpointContext> coordinatorsToCheckpoint,
 			CheckpointIDCounter checkpointIDCounter,
 			CompletedCheckpointStore completedCheckpointStore,
 			StateBackend checkpointStateBackend,
@@ -267,6 +279,7 @@ public class CheckpointCoordinator {
 		this.tasksToTrigger = checkNotNull(tasksToTrigger);
 		this.tasksToWaitFor = checkNotNull(tasksToWaitFor);
 		this.tasksToCommitTo = checkNotNull(tasksToCommitTo);
+		this.coordinatorsToCheckpoint = Collections.unmodifiableCollection(coordinatorsToCheckpoint);
 		this.pendingCheckpoints = new LinkedHashMap<>();
 		this.checkpointIdCounter = checkNotNull(checkpointIDCounter);
 		this.completedCheckpointStore = checkNotNull(completedCheckpointStore);
@@ -276,6 +289,8 @@ public class CheckpointCoordinator {
 		this.isPreferCheckpointForRecovery = chkConfig.isPreferCheckpointForRecovery();
 		this.failureManager = checkNotNull(failureManager);
 		this.clock = checkNotNull(clock);
+		this.isExactlyOnceMode = chkConfig.isExactlyOnce();
+		this.isUnalignedCheckpoint = chkConfig.isUnalignedCheckpoint();
 
 		this.recentPendingCheckpoints = new ArrayDeque<>(NUM_GHOST_CHECKPOINT_IDS);
 		this.masterHooks = new HashMap<>();
@@ -548,8 +563,16 @@ public class CheckpointCoordinator {
 							onCompletionPromise),
 						timer);
 
-			pendingCheckpointCompletableFuture
-				.thenCompose(this::snapshotMasterState)
+			final CompletableFuture<?> masterStatesComplete = pendingCheckpointCompletableFuture
+					.thenCompose(this::snapshotMasterState);
+
+			final CompletableFuture<?> coordinatorCheckpointsComplete = pendingCheckpointCompletableFuture
+					.thenComposeAsync((pendingCheckpoint) ->
+							OperatorCoordinatorCheckpoints.triggerAndAcknowledgeAllCoordinatorCheckpointsWithCompletion(
+									coordinatorsToCheckpoint, pendingCheckpoint, timer),
+							timer);
+
+			CompletableFuture.allOf(masterStatesComplete, coordinatorCheckpointsComplete)
 				.whenCompleteAsync(
 					(ignored, throwable) -> {
 						final PendingCheckpoint checkpoint =
@@ -634,6 +657,7 @@ public class CheckpointCoordinator {
 			checkpointID,
 			timestamp,
 			ackTasks,
+			OperatorCoordinatorCheckpointContext.getIds(coordinatorsToCheckpoint),
 			masterHooks.keySet(),
 			props,
 			checkpointStorageLocation,
@@ -736,7 +760,9 @@ public class CheckpointCoordinator {
 
 		final CheckpointOptions checkpointOptions = new CheckpointOptions(
 			props.getCheckpointType(),
-			checkpointStorageLocation.getLocationReference());
+			checkpointStorageLocation.getLocationReference(),
+			isExactlyOnceMode,
+			isUnalignedCheckpoint);
 
 		// send the messages to the tasks that trigger their checkpoint
 		for (Execution execution: executions) {
@@ -1080,14 +1106,22 @@ public class CheckpointCoordinator {
 			LOG.debug(builder.toString());
 		}
 
-		// send the "notify complete" call to all vertices
-		final long timestamp = completedCheckpoint.getTimestamp();
+		// send the "notify complete" call to all vertices, coordinators, etc.
+		sendAcknowledgeMessages(checkpointId, completedCheckpoint.getTimestamp());
+	}
 
+	private void sendAcknowledgeMessages(long checkpointId, long timestamp) {
+		// commit tasks
 		for (ExecutionVertex ev : tasksToCommitTo) {
 			Execution ee = ev.getCurrentExecutionAttempt();
 			if (ee != null) {
 				ee.notifyCheckpointComplete(checkpointId, timestamp);
 			}
+		}
+
+		// commit coordinators
+		for (OperatorCoordinatorCheckpointContext coordinatorContext : coordinatorsToCheckpoint) {
+			coordinatorContext.coordinator().checkpointComplete(checkpointId);
 		}
 	}
 

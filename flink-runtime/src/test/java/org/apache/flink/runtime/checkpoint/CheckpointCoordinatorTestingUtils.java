@@ -166,11 +166,13 @@ public class CheckpointCoordinatorTestingUtils {
 			++idx;
 		}
 
-		ByteStreamStateHandle streamStateHandle = new ByteStreamStateHandle(
-			String.valueOf(UUID.randomUUID()),
-			serializationWithOffsets.f0);
+		return new OperatorStreamStateHandle(offsetsMap, generateByteStreamStateHandle(serializationWithOffsets.f0));
+	}
 
-		return new OperatorStreamStateHandle(offsetsMap, streamStateHandle);
+	private static ByteStreamStateHandle generateByteStreamStateHandle(byte[] bytes) {
+		return new ByteStreamStateHandle(
+			String.valueOf(UUID.randomUUID()),
+			bytes);
 	}
 
 	static Tuple2<byte[], List<long[]>> serializeTogetherAndTrackOffsets(
@@ -470,7 +472,7 @@ public class CheckpointCoordinatorTestingUtils {
 
 		TaskStateSnapshot subtaskStates = spy(new TaskStateSnapshot());
 		OperatorSubtaskState subtaskState = spy(new OperatorSubtaskState(
-			partitionableState, null, partitionedKeyGroupState, null)
+			partitionableState, null, partitionedKeyGroupState, null, null, null)
 		);
 
 		subtaskStates.putSubtaskStateByOperatorID(OperatorID.fromJobVertexID(jobVertexID), subtaskState);
@@ -507,9 +509,7 @@ public class CheckpointCoordinatorTestingUtils {
 
 		KeyGroupRangeOffsets keyGroupRangeOffsets = new KeyGroupRangeOffsets(keyGroupRange, serializedDataWithOffsets.f1.get(0));
 
-		ByteStreamStateHandle allSerializedStatesHandle = new ByteStreamStateHandle(
-			String.valueOf(UUID.randomUUID()),
-			serializedDataWithOffsets.f0);
+		ByteStreamStateHandle allSerializedStatesHandle = generateByteStreamStateHandle(serializedDataWithOffsets.f0);
 
 		return new KeyGroupsStateHandle(keyGroupRangeOffsets, allSerializedStatesHandle);
 	}
@@ -586,6 +586,8 @@ public class CheckpointCoordinatorTestingUtils {
 
 		private boolean isExactlyOnce = true;
 
+		private boolean isUnalignedCheckpoint = false;
+
 		private boolean isPreferCheckpointForRecovery = false;
 
 		private int tolerableCpFailureNumber = 0;
@@ -621,6 +623,10 @@ public class CheckpointCoordinatorTestingUtils {
 			return this;
 		}
 
+		public void setUnalignedCheckpoint(boolean unalignedCheckpoint) {
+			isUnalignedCheckpoint = unalignedCheckpoint;
+		}
+
 		public CheckpointCoordinatorConfigurationBuilder setPreferCheckpointForRecovery(boolean preferCheckpointForRecovery) {
 			isPreferCheckpointForRecovery = preferCheckpointForRecovery;
 			return this;
@@ -639,6 +645,7 @@ public class CheckpointCoordinatorTestingUtils {
 				maxConcurrentCheckpoints,
 				checkpointRetentionPolicy,
 				isExactlyOnce,
+				isUnalignedCheckpoint,
 				isPreferCheckpointForRecovery,
 				tolerableCpFailureNumber);
 		}
@@ -658,6 +665,8 @@ public class CheckpointCoordinatorTestingUtils {
 		private ExecutionVertex[] tasksToWaitFor;
 
 		private ExecutionVertex[] tasksToCommitTo;
+
+		private Collection<OperatorCoordinatorCheckpointContext> coordinatorsToCheckpoint = Collections.emptyList();
 
 		private CheckpointIDCounter checkpointIDCounter =
 			new StandaloneCheckpointIDCounter();
@@ -718,6 +727,10 @@ public class CheckpointCoordinatorTestingUtils {
 			return this;
 		}
 
+		public void setCoordinatorsToCheckpoint(Collection<OperatorCoordinatorCheckpointContext> coordinatorsToCheckpoint) {
+			this.coordinatorsToCheckpoint = coordinatorsToCheckpoint;
+		}
+
 		public CheckpointCoordinatorBuilder setCheckpointIDCounter(
 			CheckpointIDCounter checkpointIDCounter) {
 			this.checkpointIDCounter = checkpointIDCounter;
@@ -735,7 +748,7 @@ public class CheckpointCoordinatorTestingUtils {
 			return this;
 		}
 
-		public CheckpointCoordinatorBuilder setIoExecutor(Executor exioExecutorecutor) {
+		public CheckpointCoordinatorBuilder setIoExecutor(Executor ioExecutor) {
 			this.ioExecutor = ioExecutor;
 			return this;
 		}
@@ -764,6 +777,7 @@ public class CheckpointCoordinatorTestingUtils {
 				tasksToTrigger,
 				tasksToWaitFor,
 				tasksToCommitTo,
+				coordinatorsToCheckpoint,
 				checkpointIDCounter,
 				completedCheckpointStore,
 				checkpointStateBackend,

@@ -22,6 +22,7 @@ import org.apache.flink.annotation.Internal;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.python.PythonFunctionRunner;
 import org.apache.flink.python.env.PythonEnvironmentManager;
+import org.apache.flink.python.metric.FlinkMetricContainer;
 import org.apache.flink.table.functions.ScalarFunction;
 import org.apache.flink.table.functions.python.PythonFunctionInfo;
 import org.apache.flink.table.runtime.arrow.ArrowUtils;
@@ -36,6 +37,8 @@ import org.apache.beam.runners.fnexecution.control.OutputReceiverFactory;
 import org.apache.beam.sdk.fn.data.FnDataReceiver;
 import org.apache.beam.sdk.util.WindowedValue;
 
+import java.util.Map;
+
 /**
  * Abstract {@link PythonFunctionRunner} used to execute Arrow Python {@link ScalarFunction}s.
  *
@@ -45,6 +48,10 @@ import org.apache.beam.sdk.util.WindowedValue;
 public abstract class AbstractArrowPythonScalarFunctionRunner<IN> extends AbstractPythonScalarFunctionRunner<IN> {
 
 	private static final String SCHEMA_ARROW_CODER_URN = "flink:coder:schema:scalar_function:arrow:v1";
+
+	static {
+		ArrowUtils.checkArrowUsable();
+	}
 
 	/**
 	 * Max number of elements to include in an arrow batch.
@@ -85,15 +92,17 @@ public abstract class AbstractArrowPythonScalarFunctionRunner<IN> extends Abstra
 		PythonEnvironmentManager environmentManager,
 		RowType inputType,
 		RowType outputType,
-		int maxArrowBatchSize) {
-		super(taskName, resultReceiver, scalarFunctions, environmentManager, inputType, outputType);
+		int maxArrowBatchSize,
+		Map<String, String> jobOptions,
+		FlinkMetricContainer flinkMetricContainer) {
+		super(taskName, resultReceiver, scalarFunctions, environmentManager, inputType, outputType, jobOptions, flinkMetricContainer);
 		this.maxArrowBatchSize = maxArrowBatchSize;
 	}
 
 	@Override
 	public void open() throws Exception {
 		super.open();
-		allocator = ArrowUtils.ROOT_ALLOCATOR.newChildAllocator("writer", 0, Long.MAX_VALUE);
+		allocator = ArrowUtils.getRootAllocator().newChildAllocator("writer", 0, Long.MAX_VALUE);
 		root = VectorSchemaRoot.create(ArrowUtils.toArrowSchema(getInputType()), allocator);
 		arrowWriter = createArrowWriter();
 		arrowStreamWriter = new ArrowStreamWriter(root, null, baos);
@@ -162,6 +171,7 @@ public abstract class AbstractArrowPythonScalarFunctionRunner<IN> extends Abstra
 	private void finishCurrentBatch() throws Exception {
 		if (currentBatchCount > 0) {
 			arrowWriter.finish();
+			// the batch of elements sent out as one row should be serialized into one arrow batch
 			arrowStreamWriter.writeBatch();
 			arrowWriter.reset();
 

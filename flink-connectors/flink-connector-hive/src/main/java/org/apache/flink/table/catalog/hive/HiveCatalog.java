@@ -22,6 +22,7 @@ import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.java.hadoop.mapred.utils.HadoopUtils;
 import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.connectors.hive.HiveTableFactory;
+import org.apache.flink.sql.parser.hive.ddl.SqlCreateHiveDatabase;
 import org.apache.flink.table.api.TableSchema;
 import org.apache.flink.table.api.constraints.UniqueConstraint;
 import org.apache.flink.table.catalog.AbstractCatalog;
@@ -65,11 +66,14 @@ import org.apache.flink.table.catalog.hive.util.HiveTableUtil;
 import org.apache.flink.table.catalog.stats.CatalogColumnStatistics;
 import org.apache.flink.table.catalog.stats.CatalogTableStatistics;
 import org.apache.flink.table.descriptors.DescriptorProperties;
+import org.apache.flink.table.descriptors.Schema;
 import org.apache.flink.table.expressions.Expression;
 import org.apache.flink.table.factories.FunctionDefinitionFactory;
 import org.apache.flink.table.factories.TableFactory;
 import org.apache.flink.util.StringUtils;
 
+import org.apache.hadoop.conf.Configuration;
+import org.apache.hadoop.fs.Path;
 import org.apache.hadoop.hive.common.StatsSetupConst;
 import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.hadoop.hive.metastore.TableType;
@@ -97,6 +101,7 @@ import org.slf4j.LoggerFactory;
 
 import javax.annotation.Nullable;
 
+import java.io.File;
 import java.net.MalformedURLException;
 import java.nio.file.Paths;
 import java.util.ArrayList;
@@ -129,6 +134,7 @@ public class HiveCatalog extends AbstractCatalog {
 	// It's appended to Flink function's class name
 	// because Hive's Function object doesn't have properties or other place to store the flag for Flink functions.
 	private static final String FLINK_FUNCTION_PREFIX = "flink:";
+	private static final String FLINK_PYTHON_FUNCTION_PREFIX = FLINK_FUNCTION_PREFIX + "python:";
 
 	private final HiveConf hiveConf;
 	private final String hiveVersion;
@@ -136,18 +142,29 @@ public class HiveCatalog extends AbstractCatalog {
 
 	private HiveMetastoreClientWrapper client;
 
+	public HiveCatalog(String catalogName, @Nullable String defaultDatabase, @Nullable String hiveConfDir) {
+		this(catalogName, defaultDatabase, hiveConfDir, HiveShimLoader.getHiveVersion());
+	}
+
 	public HiveCatalog(String catalogName, @Nullable String defaultDatabase, @Nullable String hiveConfDir, String hiveVersion) {
 		this(catalogName,
 			defaultDatabase == null ? DEFAULT_DB : defaultDatabase,
 			createHiveConf(hiveConfDir),
-			hiveVersion);
+			hiveVersion,
+			false);
 	}
 
 	@VisibleForTesting
-	protected HiveCatalog(String catalogName, String defaultDatabase, @Nullable HiveConf hiveConf, String hiveVersion) {
+	protected HiveCatalog(String catalogName, String defaultDatabase, @Nullable HiveConf hiveConf, String hiveVersion,
+			boolean allowEmbedded) {
 		super(catalogName, defaultDatabase == null ? DEFAULT_DB : defaultDatabase);
 
 		this.hiveConf = hiveConf == null ? createHiveConf(null) : hiveConf;
+		if (!allowEmbedded) {
+			checkArgument(!StringUtils.isNullOrWhitespaceOnly(this.hiveConf.getVar(HiveConf.ConfVars.METASTOREURIS)),
+					"Embedded metastore is not allowed. Make sure you have set a valid value for " +
+							HiveConf.ConfVars.METASTOREURIS.toString());
+		}
 		checkArgument(!StringUtils.isNullOrWhitespaceOnly(hiveVersion), "hiveVersion cannot be null or empty");
 		this.hiveVersion = hiveVersion;
 		hiveShim = HiveShimLoader.loadHiveShim(hiveVersion);
@@ -170,8 +187,17 @@ public class HiveCatalog extends AbstractCatalog {
 		}
 
 		// create HiveConf from hadoop configuration
-		return new HiveConf(HadoopUtils.getHadoopConfiguration(new org.apache.flink.configuration.Configuration()),
-			HiveConf.class);
+		Configuration hadoopConf = HadoopUtils.getHadoopConfiguration(new org.apache.flink.configuration.Configuration());
+
+		// Add mapred-site.xml. We need to read configurations like compression codec.
+		for (String possibleHadoopConfPath : HadoopUtils.possibleHadoopConfPaths(new org.apache.flink.configuration.Configuration())) {
+			File mapredSite = new File(new File(possibleHadoopConfPath), "mapred-site.xml");
+			if (mapredSite.exists()) {
+				hadoopConf.addResource(new Path(mapredSite.getAbsolutePath()));
+				break;
+			}
+		}
+		return new HiveConf(hadoopConf, HiveConf.class);
 	}
 
 	@VisibleForTesting
@@ -224,7 +250,10 @@ public class HiveCatalog extends AbstractCatalog {
 
 		Map<String, String> properties = hiveDatabase.getParameters();
 
-		properties.put(HiveCatalogConfig.DATABASE_LOCATION_URI, hiveDatabase.getLocationUri());
+		boolean isGeneric = isGenericForGet(properties);
+		if (!isGeneric) {
+			properties.put(SqlCreateHiveDatabase.DATABASE_LOCATION_URI, hiveDatabase.getLocationUri());
+		}
 
 		return new CatalogDatabaseImpl(properties, hiveDatabase.getDescription());
 	}
@@ -235,7 +264,7 @@ public class HiveCatalog extends AbstractCatalog {
 		checkArgument(!StringUtils.isNullOrWhitespaceOnly(databaseName), "databaseName cannot be null or empty");
 		checkNotNull(database, "database cannot be null");
 
-		Database hiveDatabase = instantiateHiveDatabase(databaseName, database);
+		Database hiveDatabase = HiveDatabaseUtil.instantiateHiveDatabase(databaseName, database);
 
 		try {
 			client.createDatabase(hiveDatabase);
@@ -248,20 +277,6 @@ public class HiveCatalog extends AbstractCatalog {
 		}
 	}
 
-	private static Database instantiateHiveDatabase(String databaseName, CatalogDatabase database) {
-
-		Map<String, String> properties = database.getProperties();
-
-		String dbLocationUri = properties.remove(HiveCatalogConfig.DATABASE_LOCATION_URI);
-
-		return new Database(
-			databaseName,
-			database.getComment(),
-			dbLocationUri,
-			properties
-		);
-	}
-
 	@Override
 	public void alterDatabase(String databaseName, CatalogDatabase newDatabase, boolean ignoreIfNotExists)
 			throws DatabaseNotExistException, CatalogException {
@@ -269,7 +284,10 @@ public class HiveCatalog extends AbstractCatalog {
 		checkNotNull(newDatabase, "newDatabase cannot be null");
 
 		// client.alterDatabase doesn't throw any exception if there is no existing database
-		if (!databaseExists(databaseName)) {
+		Database hiveDB;
+		try {
+			hiveDB = getHiveDatabase(databaseName);
+		} catch (DatabaseNotExistException e) {
 			if (!ignoreIfNotExists) {
 				throw new DatabaseNotExistException(getName(), databaseName);
 			}
@@ -277,10 +295,8 @@ public class HiveCatalog extends AbstractCatalog {
 			return;
 		}
 
-		Database newHiveDatabase = instantiateHiveDatabase(databaseName, newDatabase);
-
 		try {
-			client.alterDatabase(databaseName, newHiveDatabase);
+			client.alterDatabase(databaseName, HiveDatabaseUtil.alterDatabase(hiveDB, newDatabase));
 		} catch (TException e) {
 			throw new CatalogException(String.format("Failed to alter database %s", databaseName), e);
 		}
@@ -324,7 +340,8 @@ public class HiveCatalog extends AbstractCatalog {
 		}
 	}
 
-	private Database getHiveDatabase(String databaseName) throws DatabaseNotExistException {
+	@VisibleForTesting
+	public Database getHiveDatabase(String databaseName) throws DatabaseNotExistException {
 		try {
 			return client.getDatabase(databaseName);
 		} catch (NoSuchObjectException e) {
@@ -518,10 +535,7 @@ public class HiveCatalog extends AbstractCatalog {
 		// Table properties
 		Map<String, String> properties = hiveTable.getParameters();
 
-		// When retrieving a table, a generic table needs explicitly have a key is_generic = true
-		// otherwise, this is a Hive table if 1) the key is missing 2) is_generic = false
-		// this is opposite to creating a table. See instantiateHiveTable()
-		boolean isGeneric = Boolean.parseBoolean(hiveTable.getParameters().getOrDefault(CatalogConfig.IS_GENERIC, "false"));
+		boolean isGeneric = isGenericForGet(hiveTable.getParameters());
 
 		TableSchema tableSchema;
 		// Partition keys
@@ -532,12 +546,11 @@ public class HiveCatalog extends AbstractCatalog {
 			DescriptorProperties tableSchemaProps = new DescriptorProperties(true);
 			tableSchemaProps.putProperties(properties);
 			ObjectPath tablePath = new ObjectPath(hiveTable.getDbName(), hiveTable.getTableName());
-			tableSchema = tableSchemaProps.getOptionalTableSchema(HiveCatalogConfig.GENERIC_TABLE_SCHEMA_PREFIX)
+			tableSchema = tableSchemaProps.getOptionalTableSchema(Schema.SCHEMA)
 					.orElseThrow(() -> new CatalogException("Failed to get table schema from properties for generic table " + tablePath));
+			partitionKeys = tableSchemaProps.getPartitionKeys();
 			// remove the schema from properties
-			properties = properties.entrySet().stream()
-					.filter(e -> !e.getKey().startsWith(HiveCatalogConfig.GENERIC_TABLE_SCHEMA_PREFIX))
-					.collect(Collectors.toMap(Map.Entry::getKey, Map.Entry::getValue));
+			properties = CatalogTableImpl.removeRedundant(properties, tableSchema, partitionKeys);
 		} else {
 			properties.put(CatalogConfig.IS_GENERIC, String.valueOf(false));
 			// Table schema
@@ -596,17 +609,7 @@ public class HiveCatalog extends AbstractCatalog {
 			properties.put(HiveCatalogConfig.COMMENT, table.getComment());
 		}
 
-		// When creating a table, A hive table needs explicitly have a key is_generic = false
-		// otherwise, this is a generic table if 1) the key is missing 2) is_generic = true
-		// this is opposite to reading a table and instantiating a CatalogTable. See instantiateCatalogTable()
-		boolean isGeneric;
-		if (!properties.containsKey(CatalogConfig.IS_GENERIC)) {
-			// must be a generic table
-			isGeneric = true;
-			properties.put(CatalogConfig.IS_GENERIC, String.valueOf(true));
-		} else {
-			isGeneric = Boolean.parseBoolean(properties.get(CatalogConfig.IS_GENERIC));
-		}
+		boolean isGeneric = isGenericForCreate(properties);
 
 		// Hive table's StorageDescriptor
 		StorageDescriptor sd = hiveTable.getSd();
@@ -614,16 +617,13 @@ public class HiveCatalog extends AbstractCatalog {
 
 		if (isGeneric) {
 			DescriptorProperties tableSchemaProps = new DescriptorProperties(true);
-			tableSchemaProps.putTableSchema(HiveCatalogConfig.GENERIC_TABLE_SCHEMA_PREFIX, table.getSchema());
-			properties.putAll(tableSchemaProps.asMap());
+			tableSchemaProps.putTableSchema(Schema.SCHEMA, table.getSchema());
 
-			if (table instanceof CatalogTableImpl) {
-				List<String> partColNames = ((CatalogTableImpl) table).getPartitionKeys();
-				if (!partColNames.isEmpty()) {
-					throw new CatalogException("Partitioned generic table is not supported yet by HiveCatalog");
-				}
+			if (table instanceof CatalogTable) {
+				tableSchemaProps.putPartitionKeys(((CatalogTable) table).getPartitionKeys());
 			}
 
+			properties.putAll(tableSchemaProps.asMap());
 			properties = maskFlinkProperties(properties);
 		} else {
 			List<FieldSchema> allColumns = HiveTableUtil.createHiveColumns(table.getSchema());
@@ -1135,7 +1135,13 @@ public class HiveCatalog extends AbstractCatalog {
 			Function function = client.getFunction(functionPath.getDatabaseName(), functionPath.getObjectName());
 
 			if (function.getClassName().startsWith(FLINK_FUNCTION_PREFIX)) {
-				return new CatalogFunctionImpl(function.getClassName().substring(FLINK_FUNCTION_PREFIX.length()));
+				if (function.getClassName().startsWith(FLINK_PYTHON_FUNCTION_PREFIX)) {
+					return new CatalogFunctionImpl(
+						function.getClassName().substring(FLINK_PYTHON_FUNCTION_PREFIX.length()),
+						FunctionLanguage.PYTHON);
+				} else {
+					return new CatalogFunctionImpl(function.getClassName().substring(FLINK_FUNCTION_PREFIX.length()));
+				}
 			} else {
 				return new CatalogFunctionImpl(function.getClassName());
 			}
@@ -1167,13 +1173,16 @@ public class HiveCatalog extends AbstractCatalog {
 
 		// Hive Function does not have properties map
 		// thus, use a prefix in class name to distinguish Flink and Hive functions
-		String functionClassName = isGeneric ?
-			FLINK_FUNCTION_PREFIX + function.getClassName() :
-			function.getClassName();
-
-		if (!function.getFunctionLanguage().equals(FunctionLanguage.JAVA)) {
+		String functionClassName;
+		if (function.getFunctionLanguage().equals(FunctionLanguage.JAVA)) {
+			functionClassName = isGeneric ?
+				FLINK_FUNCTION_PREFIX + function.getClassName() :
+				function.getClassName();
+		} else if (function.getFunctionLanguage().equals(FunctionLanguage.PYTHON)) {
+			functionClassName = FLINK_PYTHON_FUNCTION_PREFIX + function.getClassName();
+		} else {
 			throw new UnsupportedOperationException("HiveCatalog supports only creating" +
-				" JAVA based function for now");
+				" JAVA or PYTHON based function for now");
 		}
 
 		return new Function(
@@ -1378,6 +1387,31 @@ public class HiveCatalog extends AbstractCatalog {
 			throw new CatalogException(String.format("Failed to get table stats of table %s 's partition %s",
 													tablePath.getFullName(), String.valueOf(partitionSpec)), e);
 		}
+	}
+
+	static boolean isGenericForCreate(Map<String, String> properties) {
+		// When creating an object, a hive object needs explicitly have a key is_generic = false
+		// otherwise, this is a generic object if 1) the key is missing 2) is_generic = true
+		// this is opposite to reading an object. See getObjectIsGeneric().
+		if (properties == null) {
+			return true;
+		}
+		boolean isGeneric;
+		if (!properties.containsKey(CatalogConfig.IS_GENERIC)) {
+			// must be a generic object
+			isGeneric = true;
+			properties.put(CatalogConfig.IS_GENERIC, String.valueOf(true));
+		} else {
+			isGeneric = Boolean.parseBoolean(properties.get(CatalogConfig.IS_GENERIC));
+		}
+		return isGeneric;
+	}
+
+	static boolean isGenericForGet(Map<String, String> properties) {
+		// When retrieving an object, a generic object needs explicitly have a key is_generic = true
+		// otherwise, this is a Hive object if 1) the key is missing 2) is_generic = false
+		// this is opposite to creating an object. See createObjectIsGeneric()
+		return properties != null && Boolean.parseBoolean(properties.getOrDefault(CatalogConfig.IS_GENERIC, "false"));
 	}
 
 }

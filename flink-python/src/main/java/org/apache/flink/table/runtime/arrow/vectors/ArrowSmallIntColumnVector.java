@@ -19,7 +19,7 @@
 package org.apache.flink.table.runtime.arrow.vectors;
 
 import org.apache.flink.annotation.Internal;
-import org.apache.flink.table.dataformat.vector.ShortColumnVector;
+import org.apache.flink.table.data.vector.ShortColumnVector;
 import org.apache.flink.util.Preconditions;
 
 import org.apache.arrow.vector.SmallIntVector;
@@ -44,10 +44,5 @@ public final class ArrowSmallIntColumnVector implements ShortColumnVector {
 	@Override
 	public boolean isNullAt(int i) {
 		return smallIntVector.isNull(i);
-	}
-
-	@Override
-	public void reset() {
-		smallIntVector.reset();
 	}
 }

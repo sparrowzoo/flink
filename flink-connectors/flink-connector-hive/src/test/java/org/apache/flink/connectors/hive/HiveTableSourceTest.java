@@ -24,6 +24,8 @@ import org.apache.flink.connectors.hive.read.HiveTableInputFormat;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
+import org.apache.flink.streaming.api.transformations.OneInputTransformation;
+import org.apache.flink.streaming.api.transformations.PartitionTransformation;
 import org.apache.flink.table.HiveVersionTestUtil;
 import org.apache.flink.table.api.Table;
 import org.apache.flink.table.api.TableEnvironment;
@@ -38,7 +40,7 @@ import org.apache.flink.table.catalog.exceptions.TableNotExistException;
 import org.apache.flink.table.catalog.exceptions.TableNotPartitionedException;
 import org.apache.flink.table.catalog.hive.HiveCatalog;
 import org.apache.flink.table.catalog.hive.HiveTestUtils;
-import org.apache.flink.table.dataformat.BaseRow;
+import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.factories.TableSourceFactory;
 import org.apache.flink.table.planner.delegation.PlannerBase;
 import org.apache.flink.table.planner.plan.nodes.exec.ExecNode;
@@ -411,6 +413,37 @@ public class HiveTableSourceTest {
 	}
 
 	@Test
+	public void testParallelismOnLimitPushDown() {
+		final String catalogName = "hive";
+		final String dbName = "source_db";
+		final String tblName = "test_parallelism_limit_pushdown";
+		hiveShell.execute("CREATE TABLE source_db.test_parallelism_limit_pushdown " +
+					"(year STRING, value INT) partitioned by (pt int);");
+		HiveTestUtils.createTextTableInserter(hiveShell, dbName, tblName)
+					.addRow(new Object[]{"2014", 3})
+					.addRow(new Object[]{"2014", 4})
+					.commit("pt=0");
+		HiveTestUtils.createTextTableInserter(hiveShell, dbName, tblName)
+					.addRow(new Object[]{"2015", 2})
+					.addRow(new Object[]{"2015", 5})
+					.commit("pt=1");
+		TableEnvironment tEnv = HiveTestUtils.createTableEnvWithBlinkPlannerBatchMode();
+		tEnv.getConfig().getConfiguration().setBoolean(
+			HiveOptions.TABLE_EXEC_HIVE_INFER_SOURCE_PARALLELISM, false);
+		tEnv.getConfig().getConfiguration().setInteger(
+			ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM, 2);
+		tEnv.registerCatalog(catalogName, hiveCatalog);
+		Table table = tEnv.sqlQuery("select * from hive.source_db.test_parallelism_limit_pushdown limit 1");
+		PlannerBase planner = (PlannerBase) ((TableEnvironmentImpl) tEnv).getPlanner();
+		RelNode relNode = planner.optimize(TableTestUtil.toRelNode(table));
+		ExecNode execNode = planner.translateToExecNodePlan(toScala(Collections.singletonList(relNode))).get(0);
+		@SuppressWarnings("unchecked")
+		Transformation transformation = execNode.translateToPlan(planner);
+		Assert.assertEquals(1, ((PartitionTransformation) ((OneInputTransformation) transformation).getInput())
+			.getInput().getParallelism());
+	}
+
+	@Test
 	public void testSourceConfig() throws Exception {
 		// vector reader not available for 1.x and we're not testing orc for 2.0.x
 		Assume.assumeTrue(HiveVersionTestUtil.HIVE_210_OR_LATER);
@@ -478,8 +511,8 @@ public class HiveTableSourceTest {
 		}
 
 		@Override
-		public DataStream<BaseRow> getDataStream(StreamExecutionEnvironment execEnv) {
-			DataStreamSource<BaseRow> dataStream = (DataStreamSource<BaseRow>) super.getDataStream(execEnv);
+		public DataStream<RowData> getDataStream(StreamExecutionEnvironment execEnv) {
+			DataStreamSource<RowData> dataStream = (DataStreamSource<RowData>) super.getDataStream(execEnv);
 			int parallelism = dataStream.getTransformation().getParallelism();
 			assertEquals(inferParallelism ? 1 : 2, parallelism);
 			return dataStream;
@@ -501,7 +534,7 @@ public class HiveTableSourceTest {
 
 		TestPartitionFilterCatalog(String catalogName, String defaultDatabase,
 				@Nullable HiveConf hiveConf, String hiveVersion) {
-			super(catalogName, defaultDatabase, hiveConf, hiveVersion);
+			super(catalogName, defaultDatabase, hiveConf, hiveVersion, true);
 		}
 
 		@Override

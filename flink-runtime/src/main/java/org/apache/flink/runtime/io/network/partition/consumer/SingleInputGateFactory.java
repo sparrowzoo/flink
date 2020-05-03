@@ -108,6 +108,7 @@ public class SingleInputGateFactory {
 	 */
 	public SingleInputGate create(
 			@Nonnull String owningTaskName,
+			int gateIndex,
 			@Nonnull InputGateDeploymentDescriptor igdd,
 			@Nonnull PartitionProducerStateProvider partitionProducerStateProvider,
 			@Nonnull InputChannelMetrics metrics) {
@@ -125,6 +126,7 @@ public class SingleInputGateFactory {
 
 		SingleInputGate inputGate = new SingleInputGate(
 			owningTaskName,
+			gateIndex,
 			igdd.getConsumedResultId(),
 			igdd.getConsumedPartitionType(),
 			igdd.getConsumedSubpartitionIndex(),
@@ -156,9 +158,8 @@ public class SingleInputGateFactory {
 				shuffleDescriptors[i],
 				channelStatistics,
 				metrics);
-			ResultPartitionID resultPartitionID = inputChannels[i].getPartitionId();
-			inputGate.setInputChannel(resultPartitionID.getPartitionId(), inputChannels[i]);
 		}
+		inputGate.setInputChannels(inputChannels);
 
 		LOG.debug("{}: Created {} input channels ({}).",
 			owningTaskName,

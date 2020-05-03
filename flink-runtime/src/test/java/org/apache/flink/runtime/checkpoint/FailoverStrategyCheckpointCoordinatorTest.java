@@ -36,6 +36,7 @@ import org.junit.Before;
 import org.junit.Test;
 import org.mockito.Mockito;
 
+import java.util.Collections;
 import java.util.concurrent.ThreadLocalRandom;
 
 import static org.junit.Assert.assertEquals;
@@ -72,6 +73,7 @@ public class FailoverStrategyCheckpointCoordinatorTest extends TestLogger {
 			CheckpointRetentionPolicy.NEVER_RETAIN_AFTER_TERMINATION,
 			true,
 			false,
+			false,
 			0);
 		CheckpointCoordinator checkpointCoordinator = new CheckpointCoordinator(
 			new JobID(),
@@ -79,6 +81,7 @@ public class FailoverStrategyCheckpointCoordinatorTest extends TestLogger {
 			new ExecutionVertex[] { executionVertex },
 			new ExecutionVertex[] { executionVertex },
 			new ExecutionVertex[] { executionVertex },
+			Collections.emptyList(),
 			new StandaloneCheckpointIDCounter(),
 			new StandaloneCompletedCheckpointStore(1),
 			new MemoryStateBackend(),

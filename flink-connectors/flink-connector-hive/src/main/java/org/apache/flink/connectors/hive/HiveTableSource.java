@@ -27,6 +27,7 @@ import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.datastream.DataStreamSource;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.table.api.TableSchema;
+import org.apache.flink.table.api.config.ExecutionConfigOptions;
 import org.apache.flink.table.catalog.CatalogTable;
 import org.apache.flink.table.catalog.ObjectPath;
 import org.apache.flink.table.catalog.hive.client.HiveMetastoreClientFactory;
@@ -34,7 +35,8 @@ import org.apache.flink.table.catalog.hive.client.HiveMetastoreClientWrapper;
 import org.apache.flink.table.catalog.hive.client.HiveShim;
 import org.apache.flink.table.catalog.hive.client.HiveShimLoader;
 import org.apache.flink.table.catalog.hive.descriptors.HiveCatalogValidator;
-import org.apache.flink.table.dataformat.BaseRow;
+import org.apache.flink.table.catalog.hive.util.HiveReflectionUtils;
+import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.functions.hive.conversion.HiveInspectors;
 import org.apache.flink.table.runtime.types.TypeInfoDataTypeConverter;
 import org.apache.flink.table.sources.LimitableTableSource;
@@ -50,6 +52,7 @@ import org.apache.flink.util.Preconditions;
 import org.apache.hadoop.hive.conf.HiveConf;
 import org.apache.hadoop.hive.metastore.api.Partition;
 import org.apache.hadoop.hive.metastore.api.StorageDescriptor;
+import org.apache.hadoop.hive.metastore.api.Table;
 import org.apache.hadoop.mapred.JobConf;
 import org.apache.thrift.TException;
 import org.slf4j.Logger;
@@ -65,16 +68,17 @@ import java.util.Arrays;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Properties;
 import java.util.stream.Collectors;
 
 /**
  * A TableSource implementation to read data from Hive tables.
  */
 public class HiveTableSource implements
-		StreamTableSource<BaseRow>,
+		StreamTableSource<RowData>,
 		PartitionableTableSource,
-		ProjectableTableSource<BaseRow>,
-		LimitableTableSource<BaseRow> {
+		ProjectableTableSource<RowData>,
+		LimitableTableSource<RowData> {
 
 	private static final Logger LOG = LoggerFactory.getLogger(HiveTableSource.class);
 
@@ -135,19 +139,20 @@ public class HiveTableSource implements
 	}
 
 	@Override
-	public DataStream<BaseRow> getDataStream(StreamExecutionEnvironment execEnv) {
+	public DataStream<RowData> getDataStream(StreamExecutionEnvironment execEnv) {
 		List<HiveTablePartition> allHivePartitions = initAllPartitions();
 
 		@SuppressWarnings("unchecked")
-		TypeInformation<BaseRow> typeInfo =
-				(TypeInformation<BaseRow>) TypeInfoDataTypeConverter.fromDataTypeToTypeInfo(getProducedDataType());
+		TypeInformation<RowData> typeInfo =
+				(TypeInformation<RowData>) TypeInfoDataTypeConverter.fromDataTypeToTypeInfo(getProducedDataType());
 
 		HiveTableInputFormat inputFormat = getInputFormat(
 				allHivePartitions,
 				flinkConf.get(HiveOptions.TABLE_EXEC_HIVE_FALLBACK_MAPRED_READER));
 
-		DataStreamSource<BaseRow> source = execEnv.createInput(inputFormat, typeInfo);
+		DataStreamSource<RowData> source = execEnv.createInput(inputFormat, typeInfo);
 
+		int parallelism = flinkConf.get(ExecutionConfigOptions.TABLE_EXEC_RESOURCE_DEFAULT_PARALLELISM);
 		if (flinkConf.get(HiveOptions.TABLE_EXEC_HIVE_INFER_SOURCE_PARALLELISM)) {
 			int max = flinkConf.get(HiveOptions.TABLE_EXEC_HIVE_INFER_SOURCE_PARALLELISM_MAX);
 			if (max < 1) {
@@ -168,8 +173,11 @@ public class HiveTableSource implements
 			} catch (IOException e) {
 				throw new FlinkHiveException(e);
 			}
-			source.setParallelism(Math.min(Math.max(1, splitNum), max));
+			parallelism = Math.min(splitNum, max);
 		}
+		parallelism = limit > 0 ? Math.min(parallelism, (int) limit / 1000) : parallelism;
+		parallelism = Math.max(1, parallelism);
+		source.setParallelism(parallelism);
 		return source.name(explainSource());
 	}
 
@@ -204,7 +212,7 @@ public class HiveTableSource implements
 					Arrays.stream(projectedFields).mapToObj(i -> fullTypes[i]).toArray(DataType[]::new))
 					.build().toRowDataType();
 		}
-		return type.bridgedTo(BaseRow.class);
+		return type.bridgedTo(RowData.class);
 	}
 
 	@Override
@@ -213,7 +221,7 @@ public class HiveTableSource implements
 	}
 
 	@Override
-	public TableSource<BaseRow> applyLimit(long limit) {
+	public TableSource<RowData> applyLimit(long limit) {
 		return new HiveTableSource(
 				jobConf,
 				flinkConf,
@@ -229,12 +237,12 @@ public class HiveTableSource implements
 
 	@Override
 	public List<Map<String, String>> getPartitions() {
-		throw new RuntimeException("This method is not expected to be called. " +
+		throw new UnsupportedOperationException(
 				"Please use Catalog API to retrieve all partitions of a table");
 	}
 
 	@Override
-	public TableSource<BaseRow> applyPartitionPruning(List<Map<String, String>> remainingPartitions) {
+	public TableSource<RowData> applyPartitionPruning(List<Map<String, String>> remainingPartitions) {
 		if (catalogTable.getPartitionKeys() == null || catalogTable.getPartitionKeys().size() == 0) {
 			return this;
 		} else {
@@ -253,7 +261,7 @@ public class HiveTableSource implements
 	}
 
 	@Override
-	public TableSource<BaseRow> projectFields(int[] fields) {
+	public TableSource<RowData> projectFields(int[] fields) {
 		return new HiveTableSource(
 				jobConf,
 				flinkConf,
@@ -276,6 +284,8 @@ public class HiveTableSource implements
 			String dbName = tablePath.getDatabaseName();
 			String tableName = tablePath.getObjectName();
 			List<String> partitionColNames = catalogTable.getPartitionKeys();
+			Table hiveTable = client.getTable(dbName, tableName);
+			Properties tableProps = HiveReflectionUtils.getTableMetadata(hiveShim, hiveTable);
 			if (partitionColNames != null && partitionColNames.size() > 0) {
 				final String defaultPartitionName = jobConf.get(HiveConf.ConfVars.DEFAULTPARTITIONNAME.varname,
 						HiveConf.ConfVars.DEFAULTPARTITIONNAME.defaultStrVal);
@@ -304,11 +314,11 @@ public class HiveTableSource implements
 						}
 						partitionColValues.put(partitionColName, partitionObject);
 					}
-					HiveTablePartition hiveTablePartition = new HiveTablePartition(sd, partitionColValues);
+					HiveTablePartition hiveTablePartition = new HiveTablePartition(sd, partitionColValues, tableProps);
 					allHivePartitions.add(hiveTablePartition);
 				}
 			} else {
-				allHivePartitions.add(new HiveTablePartition(client.getTable(dbName, tableName).getSd()));
+				allHivePartitions.add(new HiveTablePartition(hiveTable.getSd(), tableProps));
 			}
 		} catch (TException e) {
 			throw new FlinkHiveException("Failed to collect all partitions from hive metaStore", e);

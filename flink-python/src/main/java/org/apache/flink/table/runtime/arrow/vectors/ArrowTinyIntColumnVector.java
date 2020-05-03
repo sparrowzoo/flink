@@ -19,7 +19,7 @@
 package org.apache.flink.table.runtime.arrow.vectors;
 
 import org.apache.flink.annotation.Internal;
-import org.apache.flink.table.dataformat.vector.ByteColumnVector;
+import org.apache.flink.table.data.vector.ByteColumnVector;
 import org.apache.flink.util.Preconditions;
 
 import org.apache.arrow.vector.TinyIntVector;
@@ -44,10 +44,5 @@ public final class ArrowTinyIntColumnVector implements ByteColumnVector {
 	@Override
 	public boolean isNullAt(int i) {
 		return tinyIntVector.isNull(i);
-	}
-
-	@Override
-	public void reset() {
-		tinyIntVector.reset();
 	}
 }
